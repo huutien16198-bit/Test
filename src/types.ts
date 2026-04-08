@@ -27,6 +27,7 @@ export interface LogEntry {
 
 export interface BulkJob {
   keyword: string;
+  secondaryKeywords?: string;
   category: string;
   tags: string;
   count: number;

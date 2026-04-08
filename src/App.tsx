@@ -526,6 +526,7 @@ function SiteManager({ sites, setSites, addLog }: { sites: WPSite[], setSites: R
 
 function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[], addLog: any, googleApiKey: string, googleCx: string }) {
   const [keyword, setKeyword] = useState("");
+  const [secondaryKeywords, setSecondaryKeywords] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isPosting, setIsPosting] = useState(false);
   const [generatedContent, setGeneratedContent] = useState<{ title: string, content: string, meta: string, slug: string, imageUrl?: string } | null>(null);
@@ -538,25 +539,31 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
     try {
       const model = "gemini-3-flash-preview";
       const prompt = `
-        Bạn là chuyên gia SEO. Hãy viết một bài viết chuẩn SEO chuyên sâu về chủ đề: "${keyword}".
+        Bạn là chuyên gia SEO. Hãy viết một bài viết chuẩn SEO chuyên sâu, độ dài TỐI THIỂU 1500 từ.
+        - Từ khóa chính: "${keyword}"
+        - Từ khóa phụ: "${secondaryKeywords || 'Không có'}"
+        
         Yêu cầu BẮT BUỘC:
-        1. Bài viết phải có phần mở đầu, ít nhất 5 mục chính (sections), phần FAQ (5 câu hỏi) và kết luận.
-        2. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
+        1. Bài viết phải dài ít nhất 1500 từ. Hãy viết thật chi tiết, phân tích sâu từng khía cạnh.
+        2. Phân bổ từ khóa chính và từ khóa phụ một cách tự nhiên vào tiêu đề, mở bài, các thẻ H2, H3 và kết luận.
+        3. Bài viết phải có phần mở đầu, ít nhất 6-8 mục chính (sections) để đảm bảo độ dài, phần FAQ (5 câu hỏi) và kết luận.
+        4. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
         {
           "title": "Tiêu đề bài viết",
-          "introduction": "Đoạn mở đầu dẫn dắt",
+          "introduction": "Đoạn mở đầu dẫn dắt (chứa từ khóa)",
           "sections": [
-            { "heading": "Tiêu đề mục 1 (H2)", "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>)" },
+            { "heading": "Tiêu đề mục 1 (H2)", "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>, <h3>)" },
             { "heading": "Tiêu đề mục 2 (H2)", "content": "Nội dung chi tiết mục 2" },
             { "heading": "Tiêu đề mục 3 (H2)", "content": "Nội dung chi tiết mục 3" },
             { "heading": "Tiêu đề mục 4 (H2)", "content": "Nội dung chi tiết mục 4" },
-            { "heading": "Tiêu đề mục 5 (H2)", "content": "Nội dung chi tiết mục 5" }
+            { "heading": "Tiêu đề mục 5 (H2)", "content": "Nội dung chi tiết mục 5" },
+            { "heading": "Tiêu đề mục 6 (H2)", "content": "Nội dung chi tiết mục 6" }
           ],
           "faqs": [
             { "question": "Câu hỏi 1", "answer": "Trả lời 1" }
           ],
-          "conclusion": "Đoạn kết luận",
-          "meta": "Meta description (dưới 160 ký tự)",
+          "conclusion": "Đoạn kết luận (chứa từ khóa)",
+          "meta": "Meta description (dưới 160 ký tự, chứa từ khóa chính)",
           "slug": "url-slug-than-thien"
         }
       `;
@@ -571,7 +578,7 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
       
       let images: string[] = [];
       if (googleApiKey && googleCx) {
-        images = await fetchGoogleImages(keyword, googleApiKey, googleCx, 5);
+        images = await fetchGoogleImages(keyword, googleApiKey, googleCx, 8);
       }
       
       const finalHtml = buildArticleHtml(data, images);
@@ -651,21 +658,32 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
           <Sparkles className="text-purple-600" />
           Tạo bài viết AI
         </h3>
-        <div className="flex flex-col sm:flex-row gap-4">
-          <div className="flex-1 relative">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
-            <input 
-              type="text" 
-              placeholder="Nhập từ khóa..."
-              className="w-full pl-12 pr-4 py-3 lg:py-4 rounded-2xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none text-base lg:text-lg"
-              value={keyword}
-              onChange={e => setKeyword(e.target.value)}
-            />
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col sm:flex-row gap-4">
+            <div className="flex-1 relative">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
+              <input 
+                type="text" 
+                placeholder="Nhập từ khóa chính..."
+                className="w-full pl-12 pr-4 py-3 lg:py-4 rounded-2xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none text-base lg:text-lg"
+                value={keyword}
+                onChange={e => setKeyword(e.target.value)}
+              />
+            </div>
+            <div className="flex-1 relative">
+              <input 
+                type="text" 
+                placeholder="Từ khóa phụ (cách nhau bằng dấu phẩy)..."
+                className="w-full px-4 py-3 lg:py-4 rounded-2xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none text-base lg:text-lg"
+                value={secondaryKeywords}
+                onChange={e => setSecondaryKeywords(e.target.value)}
+              />
+            </div>
           </div>
           <button 
             onClick={generateContent}
             disabled={isGenerating || !keyword}
-            className="bg-blue-600 text-white px-6 lg:px-8 py-3 lg:py-4 rounded-2xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+            className="w-full sm:w-auto self-end bg-blue-600 text-white px-6 lg:px-8 py-3 lg:py-4 rounded-2xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {isGenerating ? <Loader2 className="animate-spin" /> : <Sparkles className="w-5 h-5" />}
             Tạo nội dung
@@ -768,6 +786,7 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
         const response = await axios.post("/api/parse-csv", { csvData });
         setJobs(response.data.map((r: any) => ({
           keyword: r.keyword,
+          secondaryKeywords: r.secondary_keywords || "",
           category: r.category,
           tags: r.tags,
           count: parseInt(r.number_of_posts || "1")
@@ -795,25 +814,31 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
         try {
           const model = "gemini-3-flash-preview";
           const prompt = `
-            Bạn là chuyên gia SEO. Hãy viết một bài viết chuẩn SEO chuyên sâu về chủ đề: "${job.keyword}".
+            Bạn là chuyên gia SEO. Hãy viết một bài viết chuẩn SEO chuyên sâu, độ dài TỐI THIỂU 1500 từ.
+            - Từ khóa chính: "${job.keyword}"
+            - Từ khóa phụ: "${job.secondaryKeywords || 'Không có'}"
+            
             Yêu cầu BẮT BUỘC:
-            1. Bài viết phải có phần mở đầu, ít nhất 5 mục chính (sections), phần FAQ (5 câu hỏi) và kết luận.
-            2. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
+            1. Bài viết phải dài ít nhất 1500 từ. Hãy viết thật chi tiết, phân tích sâu từng khía cạnh.
+            2. Phân bổ từ khóa chính và từ khóa phụ một cách tự nhiên vào tiêu đề, mở bài, các thẻ H2, H3 và kết luận.
+            3. Bài viết phải có phần mở đầu, ít nhất 6-8 mục chính (sections) để đảm bảo độ dài, phần FAQ (5 câu hỏi) và kết luận.
+            4. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
             {
               "title": "Tiêu đề bài viết",
-              "introduction": "Đoạn mở đầu dẫn dắt",
+              "introduction": "Đoạn mở đầu dẫn dắt (chứa từ khóa)",
               "sections": [
-                { "heading": "Tiêu đề mục 1 (H2)", "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>)" },
+                { "heading": "Tiêu đề mục 1 (H2)", "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>, <h3>)" },
                 { "heading": "Tiêu đề mục 2 (H2)", "content": "Nội dung chi tiết mục 2" },
                 { "heading": "Tiêu đề mục 3 (H2)", "content": "Nội dung chi tiết mục 3" },
                 { "heading": "Tiêu đề mục 4 (H2)", "content": "Nội dung chi tiết mục 4" },
-                { "heading": "Tiêu đề mục 5 (H2)", "content": "Nội dung chi tiết mục 5" }
+                { "heading": "Tiêu đề mục 5 (H2)", "content": "Nội dung chi tiết mục 5" },
+                { "heading": "Tiêu đề mục 6 (H2)", "content": "Nội dung chi tiết mục 6" }
               ],
               "faqs": [
                 { "question": "Câu hỏi 1", "answer": "Trả lời 1" }
               ],
-              "conclusion": "Đoạn kết luận",
-              "meta": "Meta description (dưới 160 ký tự)",
+              "conclusion": "Đoạn kết luận (chứa từ khóa)",
+              "meta": "Meta description (dưới 160 ký tự, chứa từ khóa chính)",
               "slug": "url-slug-than-thien"
             }
           `;
@@ -826,7 +851,7 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
 
           let images: string[] = [];
           if (googleApiKey && googleCx) {
-            images = await fetchGoogleImages(job.keyword, googleApiKey, googleCx, 5);
+            images = await fetchGoogleImages(job.keyword, googleApiKey, googleCx, 8);
           }
           
           const finalHtml = buildArticleHtml(data, images);
@@ -902,7 +927,7 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
                 <p className="text-sm font-medium text-gray-600">
                   {file ? file.name : "Nhấn hoặc kéo thả file CSV vào đây"}
                 </p>
-                <p className="text-xs text-gray-400 mt-1">Định dạng: keyword, category, tags, number_of_posts</p>
+                <p className="text-xs text-gray-400 mt-1">Định dạng: keyword, secondary_keywords, category, tags, number_of_posts</p>
               </div>
             </div>
           </div>
@@ -951,10 +976,11 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
       {jobs.length > 0 && (
         <div className="bg-white rounded-3xl border border-[#E5E7EB] overflow-hidden shadow-sm">
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[500px]">
+            <table className="w-full text-left border-collapse min-w-[600px]">
               <thead>
                 <tr className="bg-gray-50 border-b border-[#E5E7EB]">
-                  <th className="p-4 text-xs font-bold text-gray-400 uppercase">Từ khóa</th>
+                  <th className="p-4 text-xs font-bold text-gray-400 uppercase">Từ khóa chính</th>
+                  <th className="p-4 text-xs font-bold text-gray-400 uppercase">Từ khóa phụ</th>
                   <th className="p-4 text-xs font-bold text-gray-400 uppercase">Danh mục</th>
                   <th className="p-4 text-xs font-bold text-gray-400 uppercase">Thẻ (Tags)</th>
                   <th className="p-4 text-xs font-bold text-gray-400 uppercase text-center">Số lượng</th>
@@ -964,6 +990,7 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
                 {jobs.map((job, i) => (
                   <tr key={i} className="border-b border-[#F3F4F6] hover:bg-gray-50 transition-colors">
                     <td className="p-4 font-medium">{job.keyword}</td>
+                    <td className="p-4 text-sm text-gray-500">{job.secondaryKeywords || '-'}</td>
                     <td className="p-4 text-sm text-gray-500">{job.category}</td>
                     <td className="p-4 text-sm text-gray-500">{job.tags}</td>
                     <td className="p-4 text-sm font-bold text-center">{job.count}</td>
