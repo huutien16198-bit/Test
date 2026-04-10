@@ -1,0 +1,61 @@
+{
+  "entities": {
+    "WPSite": {
+      "title": "WPSite",
+      "description": "A WordPress site connection",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "site": { "type": "string" },
+        "username": { "type": "string" },
+        "applicationPassword": { "type": "string" },
+        "name": { "type": "string" },
+        "uid": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "site", "username", "applicationPassword", "name", "uid", "createdAt"]
+    },
+    "LogEntry": {
+      "title": "LogEntry",
+      "description": "A log of an action performed",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "level": { "type": "string", "enum": ["info", "success", "error", "warning"] },
+        "message": { "type": "string" },
+        "site": { "type": "string" },
+        "uid": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "timestamp", "level", "message", "uid", "createdAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "User specific settings",
+      "type": "object",
+      "properties": {
+        "googleApiKey": { "type": "string" },
+        "googleCx": { "type": "string" },
+        "unsplashApiKey": { "type": "string" },
+        "uid": { "type": "string" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["uid", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/sites/{siteId}": {
+      "schema": { "$ref": "#/entities/WPSite" },
+      "description": "WordPress sites configured by the user"
+    },
+    "/users/{userId}/logs/{logId}": {
+      "schema": { "$ref": "#/entities/LogEntry" },
+      "description": "Logs of user actions"
+    },
+    "/users/{userId}/settings/main": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "User settings"
+    }
+  }
+}

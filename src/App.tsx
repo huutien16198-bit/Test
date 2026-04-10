@@ -15,13 +15,18 @@ import {
   ExternalLink,
   Search,
   RefreshCw,
-  Settings
+  Settings,
+  LogOut,
+  LogIn
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { GoogleGenAI } from "@google/genai";
 import axios from "axios";
 import { cn } from "@/src/lib/utils";
 import { WPSite, LogEntry, BulkJob } from "./types";
+import { auth, db, loginWithGoogle, logout } from "./firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { collection, doc, onSnapshot, setDoc, deleteDoc, serverTimestamp } from "firebase/firestore";
 
 // Initialize Gemini
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -43,25 +48,34 @@ const safeJsonParse = (text: string) => {
   }
 };
 
-const fetchGoogleImages = async (query: string, apiKey: string, cx: string, count: number = 5) => {
-  if (!apiKey || !cx) return [];
-  try {
-    const res = await axios.get(`https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&cx=${cx}&key=${apiKey}&searchType=image&num=${count}`);
-    return res.data.items?.map((item: any) => item.link) || [];
-  } catch (error) {
-    console.error("Google Image Search Error:", error);
-    return [];
+const fetchSingleImage = async (query: string, unsplashKey: string, googleKey: string, googleCx: string) => {
+  if (unsplashKey) {
+    try {
+      const res = await axios.get(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=1&client_id=${unsplashKey}`);
+      if (res.data.results?.length > 0) return res.data.results[0].urls.regular;
+    } catch (e) {
+      console.error("Unsplash error:", e);
+    }
   }
+  if (googleKey && googleCx) {
+    try {
+      const res = await axios.get(`https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&cx=${googleCx}&key=${googleKey}&searchType=image&num=1`);
+      if (res.data.items?.length > 0) return res.data.items[0].link;
+    } catch (e) {
+      console.error("Google Image error:", e);
+    }
+  }
+  return null;
 };
 
-const buildArticleHtml = (data: any, images: string[]) => {
+const buildArticleHtml = (data: any, sectionImages: (string | null)[]) => {
   let html = `<p>${data.introduction}</p>\n\n`;
   if (data.sections && Array.isArray(data.sections)) {
     data.sections.forEach((sec: any, index: number) => {
       html += `<h2>${sec.heading}</h2>\n`;
       html += `<p>${sec.content}</p>\n`;
-      if (images[index]) {
-        html += `<img src="${images[index]}" alt="${sec.heading}" />\n`;
+      if (sectionImages[index]) {
+        html += `<img src="${sectionImages[index]}" alt="${sec.heading}" />\n`;
       }
     });
   }
@@ -84,49 +98,120 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [googleApiKey, setGoogleApiKey] = useState("");
   const [googleCx, setGoogleCx] = useState("");
+  const [unsplashApiKey, setUnsplashApiKey] = useState("");
   
-  // Load data from localStorage
+  const [user, setUser] = useState<any>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
   useEffect(() => {
-    const savedSites = localStorage.getItem("wp_sites");
-    if (savedSites) setSites(JSON.parse(savedSites));
-    
-    const savedLogs = localStorage.getItem("wp_logs");
-    if (savedLogs) setLogs(JSON.parse(savedLogs));
-
-    const savedKey = localStorage.getItem("google_api_key");
-    if (savedKey) setGoogleApiKey(savedKey);
-
-    const savedCx = localStorage.getItem("google_cx");
-    if (savedCx) setGoogleCx(savedCx);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
   }, []);
 
-  // Save data to localStorage
   useEffect(() => {
-    localStorage.setItem("wp_sites", JSON.stringify(sites));
-  }, [sites]);
+    if (!isAuthReady || !user) {
+      setSites([]);
+      setLogs([]);
+      setGoogleApiKey("");
+      setGoogleCx("");
+      setUnsplashApiKey("");
+      return;
+    }
 
-  useEffect(() => {
-    localStorage.setItem("wp_logs", JSON.stringify(logs));
-  }, [logs]);
+    const sitesRef = collection(db, `users/${user.uid}/sites`);
+    const unsubSites = onSnapshot(sitesRef, (snapshot) => {
+      const sitesData: WPSite[] = [];
+      snapshot.forEach((doc) => sitesData.push(doc.data() as WPSite));
+      setSites(sitesData);
+    });
 
-  useEffect(() => {
-    localStorage.setItem("google_api_key", googleApiKey);
-  }, [googleApiKey]);
+    const logsRef = collection(db, `users/${user.uid}/logs`);
+    const unsubLogs = onSnapshot(logsRef, (snapshot) => {
+      const logsData: LogEntry[] = [];
+      snapshot.forEach((doc) => logsData.push(doc.data() as LogEntry));
+      setLogs(logsData.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+    });
 
-  useEffect(() => {
-    localStorage.setItem("google_cx", googleCx);
-  }, [googleCx]);
+    const settingsRef = doc(db, `users/${user.uid}/settings/main`);
+    const unsubSettings = onSnapshot(settingsRef, (doc) => {
+      if (doc.exists()) {
+        const data = doc.data();
+        setGoogleApiKey(data.googleApiKey || "");
+        setGoogleCx(data.googleCx || "");
+        setUnsplashApiKey(data.unsplashApiKey || "");
+      }
+    });
 
-  const addLog = (message: string, level: LogEntry["level"], site?: string) => {
-    const newLog: LogEntry = {
-      id: Math.random().toString(36).substr(2, 9),
+    return () => {
+      unsubSites();
+      unsubLogs();
+      unsubSettings();
+    };
+  }, [user, isAuthReady]);
+
+  const saveSettings = async (key: string, cx: string, unsplashKey: string) => {
+    if (!user) return;
+    try {
+      await setDoc(doc(db, `users/${user.uid}/settings/main`), {
+        googleApiKey: key,
+        googleCx: cx,
+        unsplashApiKey: unsplashKey,
+        uid: user.uid,
+        updatedAt: Date.now()
+      });
+    } catch (error) {
+      console.error("Error saving settings:", error);
+    }
+  };
+
+  const addLog = async (message: string, level: LogEntry["level"], site?: string) => {
+    if (!user) return;
+    const id = Math.random().toString(36).substr(2, 9);
+    const newLog: any = {
+      id,
       timestamp: new Date().toLocaleTimeString(),
       level,
       message,
-      site
+      uid: user.uid,
+      createdAt: Date.now()
     };
-    setLogs(prev => [newLog, ...prev].slice(0, 100));
+    if (site) {
+      newLog.site = site;
+    }
+    try {
+      await setDoc(doc(db, `users/${user.uid}/logs/${id}`), newLog);
+    } catch (error) {
+      console.error("Error adding log:", error);
+    }
   };
+
+  if (!isAuthReady) {
+    return <div className="flex h-screen items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-blue-600" /></div>;
+  }
+
+  if (!user) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-50">
+        <div className="bg-white p-8 rounded-3xl shadow-xl text-center max-w-md w-full">
+          <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
+            <Globe className="w-8 h-8" />
+          </div>
+          <h1 className="text-2xl font-bold mb-2">WP AutoPost</h1>
+          <p className="text-gray-500 mb-8">Đăng nhập để quản lý website và tự động hóa bài viết của bạn.</p>
+          <button 
+            onClick={loginWithGoogle}
+            className="w-full flex items-center justify-center gap-3 bg-white border border-gray-300 text-gray-700 px-6 py-3 rounded-xl font-bold hover:bg-gray-50 transition-all"
+          >
+            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+            Đăng nhập với Google
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans overflow-hidden relative">
@@ -267,15 +352,15 @@ export default function App() {
             )}
 
             {activeTab === "sites" && (
-              <SiteManager sites={sites} setSites={setSites} addLog={addLog} />
+              <SiteManager sites={sites} setSites={setSites} addLog={addLog} user={user} />
             )}
 
             {activeTab === "generator" && (
-              <ContentGenerator sites={sites} addLog={addLog} googleApiKey={googleApiKey} googleCx={googleCx} />
+              <ContentGenerator sites={sites} addLog={addLog} googleApiKey={googleApiKey} googleCx={googleCx} unsplashApiKey={unsplashApiKey} />
             )}
 
             {activeTab === "bulk" && (
-              <BulkPoster sites={sites} addLog={addLog} googleApiKey={googleApiKey} googleCx={googleCx} />
+              <BulkPoster sites={sites} addLog={addLog} googleApiKey={googleApiKey} googleCx={googleCx} unsplashApiKey={unsplashApiKey} />
             )}
 
             {activeTab === "logs" && (
@@ -286,6 +371,8 @@ export default function App() {
               <SettingsPanel 
                 googleApiKey={googleApiKey} setGoogleApiKey={setGoogleApiKey}
                 googleCx={googleCx} setGoogleCx={setGoogleCx}
+                unsplashApiKey={unsplashApiKey} setUnsplashApiKey={setUnsplashApiKey}
+                saveSettings={saveSettings}
               />
             )}
           </AnimatePresence>
@@ -344,30 +431,43 @@ function QuickAction({ title, description, icon, onClick }: { title: string, des
 
 // --- SUB-COMPONENTS ---
 
-function SiteManager({ sites, setSites, addLog }: { sites: WPSite[], setSites: React.Dispatch<React.SetStateAction<WPSite[]>>, addLog: any }) {
+function SiteManager({ sites, setSites, addLog, user }: { sites: WPSite[], setSites: React.Dispatch<React.SetStateAction<WPSite[]>>, addLog: any, user: any }) {
   const [isAdding, setIsAdding] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [newSite, setNewSite] = useState<Partial<WPSite>>({ site: '', username: '', applicationPassword: '', name: '' });
 
-  const handleAdd = () => {
-    if (!newSite.site || !newSite.username || !newSite.applicationPassword) return;
+  const handleAdd = async () => {
+    if (!newSite.site || !newSite.username || !newSite.applicationPassword || !user) return;
     const site: WPSite = {
       id: Math.random().toString(36).substr(2, 9),
       site: newSite.site.replace(/\/$/, ""),
       username: newSite.username,
       applicationPassword: newSite.applicationPassword,
-      name: newSite.name || new URL(newSite.site).hostname
+      name: newSite.name || new URL(newSite.site).hostname,
+      uid: user.uid,
+      createdAt: Date.now()
     };
-    setSites([...sites, site]);
-    setNewSite({ site: '', username: '', applicationPassword: '', name: '' });
-    setIsAdding(false);
-    addLog(`Đã thêm website: ${site.name}`, 'success');
+    
+    try {
+      await setDoc(doc(db, `users/${user.uid}/sites/${site.id}`), site);
+      setNewSite({ site: '', username: '', applicationPassword: '', name: '' });
+      setIsAdding(false);
+      addLog(`Đã thêm website: ${site.name}`, 'success');
+    } catch (error) {
+      console.error("Error adding site:", error);
+      addLog(`Lỗi thêm website: ${error}`, 'error');
+    }
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
+    if (!user) return;
     const site = sites.find(s => s.id === id);
-    setSites(sites.filter(s => s.id !== id));
-    addLog(`Đã xóa website: ${site?.name}`, 'info');
+    try {
+      await deleteDoc(doc(db, `users/${user.uid}/sites/${id}`));
+      addLog(`Đã xóa website: ${site?.name}`, 'info');
+    } catch (error) {
+      console.error("Error deleting site:", error);
+    }
   };
 
   const testConnection = async (site: WPSite) => {
@@ -524,40 +624,47 @@ function SiteManager({ sites, setSites, addLog }: { sites: WPSite[], setSites: R
   );
 }
 
-function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[], addLog: any, googleApiKey: string, googleCx: string }) {
+function ContentGenerator({ sites, addLog, googleApiKey, googleCx, unsplashApiKey }: { sites: WPSite[], addLog: any, googleApiKey: string, googleCx: string, unsplashApiKey: string }) {
   const [keyword, setKeyword] = useState("");
   const [secondaryKeywords, setSecondaryKeywords] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isPosting, setIsPosting] = useState(false);
-  const [generatedContent, setGeneratedContent] = useState<{ title: string, content: string, meta: string, slug: string, imageUrl?: string } | null>(null);
+  const [generatedContent, setGeneratedContent] = useState<{ title: string, content: string, meta: string, slug: string, imageUrl?: string, imageAlt?: string } | null>(null);
   const [selectedSiteId, setSelectedSiteId] = useState("");
   const [imageUrl, setImageUrl] = useState("");
+  const [scheduleDate, setScheduleDate] = useState("");
+  const [internalLinks, setInternalLinks] = useState("");
 
   const generateContent = async () => {
     if (!keyword) return;
     setIsGenerating(true);
     try {
       const model = "gemini-3-flash-preview";
+      const currentYear = new Date().getFullYear();
       const prompt = `
         Bạn là chuyên gia SEO. Hãy viết một bài viết chuẩn SEO chuyên sâu, độ dài TỐI THIỂU 1500 từ.
         - Từ khóa chính: "${keyword}"
         - Từ khóa phụ: "${secondaryKeywords || 'Không có'}"
+        - Liên kết nội bộ (Internal Links): ${internalLinks || 'Không có'}
         
         Yêu cầu BẮT BUỘC:
-        1. Bài viết phải dài ít nhất 1500 từ. Hãy viết thật chi tiết, phân tích sâu từng khía cạnh.
-        2. Phân bổ từ khóa chính và từ khóa phụ một cách tự nhiên vào tiêu đề, mở bài, các thẻ H2, H3 và kết luận.
-        3. Bài viết phải có phần mở đầu, ít nhất 6-8 mục chính (sections) để đảm bảo độ dài, phần FAQ (5 câu hỏi) và kết luận.
-        4. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
+        1. Sử dụng công cụ tìm kiếm để cập nhật thông tin mới nhất (hiện tại là năm ${currentYear}).
+        2. Bài viết phải dài ít nhất 1500 từ. Hãy viết thật chi tiết, phân tích sâu từng khía cạnh.
+        3. Phân bổ từ khóa chính và từ khóa phụ một cách tự nhiên vào tiêu đề, mở bài, các thẻ H2, H3 và kết luận.
+        4. Chèn các liên kết nội bộ (nếu có) vào văn bản một cách tự nhiên bằng thẻ <a>.
+        5. Bài viết phải có phần mở đầu, ít nhất 6-8 mục chính (sections) để đảm bảo độ dài, phần FAQ (5 câu hỏi) và kết luận.
+        6. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
         {
           "title": "Tiêu đề bài viết",
           "introduction": "Đoạn mở đầu dẫn dắt (chứa từ khóa)",
+          "featured_image_keyword": "từ khóa tiếng Anh ngắn gọn để tìm ảnh đại diện",
           "sections": [
-            { "heading": "Tiêu đề mục 1 (H2)", "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>, <h3>)" },
-            { "heading": "Tiêu đề mục 2 (H2)", "content": "Nội dung chi tiết mục 2" },
-            { "heading": "Tiêu đề mục 3 (H2)", "content": "Nội dung chi tiết mục 3" },
-            { "heading": "Tiêu đề mục 4 (H2)", "content": "Nội dung chi tiết mục 4" },
-            { "heading": "Tiêu đề mục 5 (H2)", "content": "Nội dung chi tiết mục 5" },
-            { "heading": "Tiêu đề mục 6 (H2)", "content": "Nội dung chi tiết mục 6" }
+            { 
+              "heading": "Tiêu đề mục 1 (H2)", 
+              "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>, <h3>, <a>)",
+              "image_keyword": "từ khóa tiếng Anh ngắn gọn để tìm ảnh minh họa cho mục này"
+            },
+            { "heading": "Tiêu đề mục 2 (H2)", "content": "Nội dung chi tiết mục 2", "image_keyword": "english keyword" }
           ],
           "faqs": [
             { "question": "Câu hỏi 1", "answer": "Trả lời 1" }
@@ -571,26 +678,68 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
       const response = await ai.models.generateContent({
         model,
         contents: [{ parts: [{ text: prompt }] }],
-        config: { responseMimeType: "application/json" }
+        config: { 
+          responseMimeType: "application/json",
+          tools: [{ googleSearch: {} }]
+        }
       });
 
       const data = safeJsonParse(response.text || "{}");
       const slug = data.slug || keyword.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
       
-      let images: string[] = [];
-      if (googleApiKey && googleCx) {
-        images = await fetchGoogleImages(keyword, googleApiKey, googleCx, 8);
+      // Fetch featured image
+      let featuredImage = "";
+      if (unsplashApiKey || (googleApiKey && googleCx)) {
+        featuredImage = await fetchSingleImage(data.featured_image_keyword || keyword, unsplashApiKey, googleApiKey, googleCx) || "";
+      }
+      if (!featuredImage) {
+        featuredImage = `https://picsum.photos/seed/${encodeURIComponent(keyword)}/1200/630`;
+      }
+
+      // Fetch section images
+      const sectionImages: (string | null)[] = [];
+      if (data.sections && Array.isArray(data.sections)) {
+        if (unsplashApiKey || (googleApiKey && googleCx)) {
+          const promises = data.sections.map((sec: any) => 
+            fetchSingleImage(sec.image_keyword || sec.heading, unsplashApiKey, googleApiKey, googleCx)
+          );
+          const results = await Promise.all(promises);
+          sectionImages.push(...results);
+        } else {
+          // No API keys, no section images
+          data.sections.forEach(() => sectionImages.push(null));
+        }
       }
       
-      const finalHtml = buildArticleHtml(data, images);
-      const featuredImage = images.length > 0 ? images[0] : `https://picsum.photos/seed/${encodeURIComponent(keyword)}/1200/630`;
+      let finalHtml = buildArticleHtml(data, sectionImages);
       
+      // Extract Search Grounding URLs
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+      if (chunks && chunks.length > 0) {
+        finalHtml += `\n<h2>Nguồn tham khảo</h2>\n<ul>\n`;
+        chunks.forEach((chunk: any) => {
+          if (chunk.web?.uri && chunk.web?.title) {
+            finalHtml += `<li><a href="${chunk.web.uri}" target="_blank" rel="noopener noreferrer">${chunk.web.title}</a></li>\n`;
+          }
+        });
+        finalHtml += `</ul>\n`;
+      }
+      
+      // Generate alt text for featured image
+      const altTextPrompt = `Tạo một thẻ alt (alternative text) ngắn gọn, chuẩn SEO cho hình ảnh đại diện của bài viết có tiêu đề: "${data.title}". Từ khóa chính: "${keyword}". Trả về CHỈ nội dung thẻ alt, không có ngoặc kép hay giải thích.`;
+      const altResponse = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: [{ parts: [{ text: altTextPrompt }] }]
+      });
+      const featuredImageAlt = altResponse.text?.trim() || keyword;
+
       setGeneratedContent({ 
         title: data.title, 
         content: finalHtml, 
         meta: data.meta, 
         slug: slug, 
-        imageUrl: featuredImage 
+        imageUrl: featuredImage,
+        imageAlt: featuredImageAlt
       });
       setImageUrl(featuredImage);
       addLog(`Đã tạo nội dung cho: ${keyword}`, 'success');
@@ -618,7 +767,8 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
           username: site.username,
           password: site.applicationPassword,
           imageUrl: imageUrl,
-          filename: `${generatedContent.slug}.jpg`
+          filename: `${generatedContent.slug}.jpg`,
+          altText: generatedContent.imageAlt
         });
         mediaId = mediaResponse.data.id;
       }
@@ -630,7 +780,8 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
         postData: {
           title: generatedContent.title,
           content: generatedContent.content,
-          status: 'publish',
+          status: scheduleDate ? 'future' : 'publish',
+          date: scheduleDate ? new Date(scheduleDate).toISOString() : undefined,
           slug: generatedContent.slug,
           featured_media: mediaId,
           meta: {
@@ -681,6 +832,15 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
               />
             </div>
           </div>
+          <div className="relative">
+            <input 
+              type="text" 
+              placeholder="Liên kết nội bộ (Ví dụ: https://example.com/bai-1, https://example.com/bai-2)..."
+              className="w-full px-4 py-3 lg:py-4 rounded-2xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none text-base lg:text-lg"
+              value={internalLinks}
+              onChange={e => setInternalLinks(e.target.value)}
+            />
+          </div>
           <button 
             onClick={generateContent}
             disabled={isGenerating || !keyword}
@@ -700,8 +860,17 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
         >
             <div className="lg:col-span-2 space-y-6">
               <div className="bg-white p-4 lg:p-8 rounded-3xl border border-[#E5E7EB] shadow-sm">
-                <h4 className="text-xl lg:text-2xl font-bold mb-4">{generatedContent.title}</h4>
-                <div className="prose prose-sm lg:prose-blue max-w-none text-gray-600 leading-relaxed" dangerouslySetInnerHTML={{ __html: generatedContent.content }} />
+                <input 
+                  type="text" 
+                  value={generatedContent.title}
+                  onChange={e => setGeneratedContent({...generatedContent, title: e.target.value})}
+                  className="w-full text-xl lg:text-2xl font-bold mb-4 outline-none border-b border-transparent hover:border-gray-200 focus:border-blue-500 transition-colors"
+                />
+                <textarea 
+                  value={generatedContent.content} 
+                  onChange={(e) => setGeneratedContent({...generatedContent, content: e.target.value})}
+                  className="w-full h-[500px] mb-12 p-4 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
               </div>
             </div>
           
@@ -751,13 +920,24 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
                     <option key={site.id} value={site.id}>{site.name}</option>
                   ))}
                 </select>
+                
+                <div>
+                  <label className="text-xs font-bold text-gray-400 uppercase mb-1 block">Lên lịch đăng (Tùy chọn)</label>
+                  <input 
+                    type="datetime-local" 
+                    className="w-full p-3 rounded-xl border border-gray-200 outline-none text-sm"
+                    value={scheduleDate}
+                    onChange={e => setScheduleDate(e.target.value)}
+                  />
+                </div>
+
                 <button 
                   onClick={publishToWP}
                   disabled={isPosting || !selectedSiteId}
                   className="w-full bg-green-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-green-200 hover:bg-green-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {isPosting ? <Loader2 className="animate-spin" /> : <Send className="w-5 h-5" />}
-                  Đăng ngay
+                  {scheduleDate ? "Lên lịch đăng" : "Đăng ngay"}
                 </button>
               </div>
             </div>
@@ -768,12 +948,27 @@ function ContentGenerator({ sites, addLog, googleApiKey, googleCx }: { sites: WP
   );
 }
 
-function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[], addLog: any, googleApiKey: string, googleCx: string }) {
+function BulkPoster({ sites, addLog, googleApiKey, googleCx, unsplashApiKey }: { sites: WPSite[], addLog: any, googleApiKey: string, googleCx: string, unsplashApiKey: string }) {
   const [file, setFile] = useState<File | null>(null);
   const [jobs, setJobs] = useState<BulkJob[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [selectedSiteId, setSelectedSiteId] = useState("");
   const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [scheduleDate, setScheduleDate] = useState("");
+  const [scheduleInterval, setScheduleInterval] = useState(60); // minutes
+  
+  // Use a ref to track paused state inside the async loop
+  const isPausedRef = React.useRef(isPaused);
+  const isProcessingRef = React.useRef(isProcessing);
+
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
+  useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
@@ -805,35 +1000,54 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
     const site = sites.find(s => s.id === selectedSiteId);
     if (!site) return;
 
+    if (isProcessing && isPaused) {
+      setIsPaused(false);
+      return;
+    }
+
     setIsProcessing(true);
+    setIsPaused(false);
     const total = jobs.reduce((acc, job) => acc + job.count, 0);
     setProgress({ current: 0, total });
 
     let currentCount = 0;
+    let currentScheduleTime = scheduleDate ? new Date(scheduleDate).getTime() : 0;
+
     for (const job of jobs) {
       for (let i = 0; i < job.count; i++) {
+        // Check if stopped
+        if (!isProcessingRef.current) return;
+
+        // Wait if paused
+        while (isPausedRef.current) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          if (!isProcessingRef.current) return; // Check again in case stopped while paused
+        }
         try {
           const model = "gemini-3-flash-preview";
+          const currentYear = new Date().getFullYear();
           const prompt = `
             Bạn là chuyên gia SEO. Hãy viết một bài viết chuẩn SEO chuyên sâu, độ dài TỐI THIỂU 1500 từ.
             - Từ khóa chính: "${job.keyword}"
             - Từ khóa phụ: "${job.secondaryKeywords || 'Không có'}"
             
             Yêu cầu BẮT BUỘC:
-            1. Bài viết phải dài ít nhất 1500 từ. Hãy viết thật chi tiết, phân tích sâu từng khía cạnh.
-            2. Phân bổ từ khóa chính và từ khóa phụ một cách tự nhiên vào tiêu đề, mở bài, các thẻ H2, H3 và kết luận.
-            3. Bài viết phải có phần mở đầu, ít nhất 6-8 mục chính (sections) để đảm bảo độ dài, phần FAQ (5 câu hỏi) và kết luận.
-            4. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
+            1. Sử dụng công cụ tìm kiếm để cập nhật thông tin mới nhất (hiện tại là năm ${currentYear}).
+            2. Bài viết phải dài ít nhất 1500 từ. Hãy viết thật chi tiết, phân tích sâu từng khía cạnh.
+            3. Phân bổ từ khóa chính và từ khóa phụ một cách tự nhiên vào tiêu đề, mở bài, các thẻ H2, H3 và kết luận.
+            4. Bài viết phải có phần mở đầu, ít nhất 6-8 mục chính (sections) để đảm bảo độ dài, phần FAQ (5 câu hỏi) và kết luận.
+            5. Trả về ĐÚNG định dạng JSON sau, không thêm bất kỳ ký tự nào khác:
             {
               "title": "Tiêu đề bài viết",
               "introduction": "Đoạn mở đầu dẫn dắt (chứa từ khóa)",
+              "featured_image_keyword": "từ khóa tiếng Anh ngắn gọn để tìm ảnh đại diện",
               "sections": [
-                { "heading": "Tiêu đề mục 1 (H2)", "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>, <h3>)" },
-                { "heading": "Tiêu đề mục 2 (H2)", "content": "Nội dung chi tiết mục 2" },
-                { "heading": "Tiêu đề mục 3 (H2)", "content": "Nội dung chi tiết mục 3" },
-                { "heading": "Tiêu đề mục 4 (H2)", "content": "Nội dung chi tiết mục 4" },
-                { "heading": "Tiêu đề mục 5 (H2)", "content": "Nội dung chi tiết mục 5" },
-                { "heading": "Tiêu đề mục 6 (H2)", "content": "Nội dung chi tiết mục 6" }
+                { 
+                  "heading": "Tiêu đề mục 1 (H2)", 
+                  "content": "Nội dung chi tiết mục 1 (dùng HTML cơ bản như <ul>, <b>, <h3>)",
+                  "image_keyword": "từ khóa tiếng Anh ngắn gọn để tìm ảnh minh họa cho mục này"
+                },
+                { "heading": "Tiêu đề mục 2 (H2)", "content": "Nội dung chi tiết mục 2", "image_keyword": "english keyword" }
               ],
               "faqs": [
                 { "question": "Câu hỏi 1", "answer": "Trả lời 1" }
@@ -846,18 +1060,58 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
           const aiResponse = await ai.models.generateContent({
             model,
             contents: [{ parts: [{ text: prompt }] }],
-            config: { responseMimeType: "application/json" }
+            config: { 
+              responseMimeType: "application/json",
+              tools: [{ googleSearch: {} }]
+            }
           });
           const data = safeJsonParse(aiResponse.text || "{}");
           const slug = data.slug || job.keyword.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
-          let images: string[] = [];
-          if (googleApiKey && googleCx) {
-            images = await fetchGoogleImages(job.keyword, googleApiKey, googleCx, 8);
+          // Fetch featured image
+          let featuredImage = "";
+          if (unsplashApiKey || (googleApiKey && googleCx)) {
+            featuredImage = await fetchSingleImage(data.featured_image_keyword || job.keyword, unsplashApiKey, googleApiKey, googleCx) || "";
+          }
+          if (!featuredImage) {
+            featuredImage = `https://picsum.photos/seed/${encodeURIComponent(job.keyword)}/1200/630`;
+          }
+
+          // Fetch section images
+          const sectionImages: (string | null)[] = [];
+          if (data.sections && Array.isArray(data.sections)) {
+            if (unsplashApiKey || (googleApiKey && googleCx)) {
+              const promises = data.sections.map((sec: any) => 
+                fetchSingleImage(sec.image_keyword || sec.heading, unsplashApiKey, googleApiKey, googleCx)
+              );
+              const results = await Promise.all(promises);
+              sectionImages.push(...results);
+            } else {
+              data.sections.forEach(() => sectionImages.push(null));
+            }
           }
           
-          const finalHtml = buildArticleHtml(data, images);
-          const featuredImage = images.length > 0 ? images[0] : `https://picsum.photos/seed/${encodeURIComponent(job.keyword)}/1200/630`;
+          let finalHtml = buildArticleHtml(data, sectionImages);
+
+          // Extract Search Grounding URLs
+          const chunks = aiResponse.candidates?.[0]?.groundingMetadata?.groundingChunks;
+          if (chunks && chunks.length > 0) {
+            finalHtml += `\n<h2>Nguồn tham khảo</h2>\n<ul>\n`;
+            chunks.forEach((chunk: any) => {
+              if (chunk.web?.uri && chunk.web?.title) {
+                finalHtml += `<li><a href="${chunk.web.uri}" target="_blank" rel="noopener noreferrer">${chunk.web.title}</a></li>\n`;
+              }
+            });
+            finalHtml += `</ul>\n`;
+          }
+
+          // Generate alt text for featured image
+          const altTextPrompt = `Tạo một thẻ alt (alternative text) ngắn gọn, chuẩn SEO cho hình ảnh đại diện của bài viết có tiêu đề: "${data.title}". Từ khóa chính: "${job.keyword}". Trả về CHỈ nội dung thẻ alt, không có ngoặc kép hay giải thích.`;
+          const altResponse = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: [{ parts: [{ text: altTextPrompt }] }]
+          });
+          const featuredImageAlt = altResponse.text?.trim() || job.keyword;
 
           let mediaId = undefined;
           if (featuredImage) {
@@ -867,7 +1121,8 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
                 username: site.username,
                 password: site.applicationPassword,
                 imageUrl: featuredImage,
-                filename: `${slug}.jpg`
+                filename: `${slug}.jpg`,
+                altText: featuredImageAlt
               });
               mediaId = mediaResponse.data.id;
             } catch (e: any) {
@@ -877,6 +1132,15 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
             }
           }
 
+          let postStatus = 'publish';
+          let postDate = undefined;
+          
+          if (currentScheduleTime > 0) {
+            postStatus = 'future';
+            postDate = new Date(currentScheduleTime).toISOString();
+            currentScheduleTime += scheduleInterval * 60000; // Add interval in milliseconds
+          }
+
           await axios.post("/api/wp/post", {
             site: site.site,
             username: site.username,
@@ -884,7 +1148,8 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
             postData: {
               title: data.title,
               content: finalHtml,
-              status: 'publish',
+              status: postStatus,
+              date: postDate,
               slug: slug,
               featured_media: mediaId,
               categories: job.category ? [parseInt(job.category)] : []
@@ -949,14 +1214,59 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
               ))}
             </select>
             
-            <button 
-              onClick={startBulkProcess}
-              disabled={isProcessing || jobs.length === 0 || !selectedSiteId}
-              className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-            >
-              {isProcessing ? <Loader2 className="animate-spin" /> : <Send className="w-5 h-5" />}
-              Bắt đầu đăng hàng loạt
-            </button>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs font-bold text-gray-400 uppercase mb-1 block">Lên lịch từ (Tùy chọn)</label>
+                <input 
+                  type="datetime-local" 
+                  className="w-full p-3 rounded-xl border border-gray-200 outline-none text-sm"
+                  value={scheduleDate}
+                  onChange={e => setScheduleDate(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-gray-400 uppercase mb-1 block">Khoảng cách (Phút)</label>
+                <input 
+                  type="number" 
+                  min="1"
+                  className="w-full p-3 rounded-xl border border-gray-200 outline-none text-sm"
+                  value={scheduleInterval}
+                  onChange={e => setScheduleInterval(parseInt(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button 
+                onClick={startBulkProcess}
+                disabled={isProcessing || jobs.length === 0 || !selectedSiteId}
+                className="flex-1 bg-blue-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isProcessing && !isPaused ? <Loader2 className="animate-spin" /> : <Send className="w-5 h-5" />}
+                {isProcessing ? (isPaused ? "Tiếp tục" : "Đang xử lý...") : "Bắt đầu đăng hàng loạt"}
+              </button>
+              
+              {isProcessing && (
+                <button
+                  onClick={() => setIsPaused(!isPaused)}
+                  className="px-6 bg-amber-500 text-white rounded-2xl font-bold shadow-lg shadow-amber-200 hover:bg-amber-600 transition-all"
+                >
+                  {isPaused ? "Tiếp tục" : "Tạm dừng"}
+                </button>
+              )}
+              
+              {isProcessing && (
+                <button
+                  onClick={() => {
+                    setIsProcessing(false);
+                    setIsPaused(false);
+                  }}
+                  className="px-6 bg-red-500 text-white rounded-2xl font-bold shadow-lg shadow-red-200 hover:bg-red-600 transition-all"
+                >
+                  Dừng hẳn
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1009,7 +1319,22 @@ function BulkPoster({ sites, addLog, googleApiKey, googleCx }: { sites: WPSite[]
   );
 }
 
-function SettingsPanel({ googleApiKey, setGoogleApiKey, googleCx, setGoogleCx }: { googleApiKey: string, setGoogleApiKey: any, googleCx: string, setGoogleCx: any }) {
+function SettingsPanel({ 
+  googleApiKey, setGoogleApiKey, 
+  googleCx, setGoogleCx,
+  unsplashApiKey, setUnsplashApiKey,
+  saveSettings
+}: { 
+  googleApiKey: string, setGoogleApiKey: any, 
+  googleCx: string, setGoogleCx: any,
+  unsplashApiKey: string, setUnsplashApiKey: any,
+  saveSettings: (key: string, cx: string, unsplashKey: string) => void
+}) {
+  const handleSave = () => {
+    saveSettings(googleApiKey, googleCx, unsplashApiKey);
+    alert("Đã lưu cài đặt!");
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0, x: 20 }}
@@ -1022,7 +1347,7 @@ function SettingsPanel({ googleApiKey, setGoogleApiKey, googleCx, setGoogleCx }:
           Cài đặt hệ thống
         </h3>
         
-        <div className="space-y-6">
+        <div className="space-y-8">
           <div>
             <h4 className="font-bold text-gray-800 mb-2">Google Custom Search API</h4>
             <p className="text-sm text-gray-500 mb-4">
@@ -1052,6 +1377,30 @@ function SettingsPanel({ googleApiKey, setGoogleApiKey, googleCx, setGoogleCx }:
               </div>
             </div>
           </div>
+
+          <div className="pt-6 border-t border-gray-100">
+            <h4 className="font-bold text-gray-800 mb-2">Unsplash API</h4>
+            <p className="text-sm text-gray-500 mb-4">
+              Cấu hình API để lấy ảnh chất lượng cao, miễn phí bản quyền từ Unsplash.
+            </p>
+            <div>
+              <label className="text-xs font-bold text-gray-400 uppercase mb-1 block">Access Key</label>
+              <input 
+                type="password" 
+                placeholder="Nhập Access Key của Unsplash..."
+                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none text-base"
+                value={unsplashApiKey}
+                onChange={e => setUnsplashApiKey(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <button 
+            onClick={handleSave}
+            className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all"
+          >
+            Lưu cài đặt
+          </button>
         </div>
       </div>
     </motion.div>

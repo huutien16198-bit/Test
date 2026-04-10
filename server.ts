@@ -140,6 +140,26 @@ async function startServer() {
       });
       
       console.log(`Upload successful: ID ${response.data.id}`);
+
+      // If altText is provided, update the media item
+      if (req.body.altText && response.data.id) {
+        try {
+          await axios.post(`${site}/wp-json/wp/v2/media/${response.data.id}`, {
+            alt_text: req.body.altText
+          }, {
+            headers: {
+              Authorization: `Basic ${auth}`,
+              "Content-Type": "application/json",
+            },
+            httpsAgent
+          });
+          console.log(`Alt text updated for media ID ${response.data.id}`);
+        } catch (altError: any) {
+          console.error("Failed to update alt text:", altError.message);
+          // Don't fail the whole request if just alt text fails
+        }
+      }
+
       res.json(response.data);
     } catch (error: any) {
       if (error.response) {
@@ -164,6 +184,36 @@ async function startServer() {
           message: error.message
         });
       }
+    }
+  });
+
+  // WordPress Categories Proxy
+  app.post("/api/wp/categories", async (req, res) => {
+    const { site, username, password } = req.body;
+    try {
+      const auth = Buffer.from(`${username}:${password}`).toString("base64");
+      const response = await axios.get(`${site}/wp-json/wp/v2/categories?per_page=100`, {
+        headers: { Authorization: `Basic ${auth}` },
+        httpsAgent
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      res.status(error.response?.status || 500).json(error.response?.data || { message: error.message });
+    }
+  });
+
+  // WordPress Tags Proxy
+  app.post("/api/wp/tags", async (req, res) => {
+    const { site, username, password } = req.body;
+    try {
+      const auth = Buffer.from(`${username}:${password}`).toString("base64");
+      const response = await axios.get(`${site}/wp-json/wp/v2/tags?per_page=100`, {
+        headers: { Authorization: `Basic ${auth}` },
+        httpsAgent
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      res.status(error.response?.status || 500).json(error.response?.data || { message: error.message });
     }
   });
 

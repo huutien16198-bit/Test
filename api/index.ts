@@ -144,6 +144,36 @@ app.post("/api/wp/media", async (req, res) => {
   }
 });
 
+// WordPress Categories Proxy
+app.post("/api/wp/categories", async (req, res) => {
+  const { site, username, password } = req.body;
+  try {
+    const auth = Buffer.from(`${username}:${password}`).toString("base64");
+    const response = await axios.get(`${site}/wp-json/wp/v2/categories?per_page=100`, {
+      headers: { Authorization: `Basic ${auth}` },
+      httpsAgent
+    });
+    res.json(response.data);
+  } catch (error: any) {
+    res.status(error.response?.status || 500).json(error.response?.data || { message: error.message });
+  }
+});
+
+// WordPress Tags Proxy
+app.post("/api/wp/tags", async (req, res) => {
+  const { site, username, password } = req.body;
+  try {
+    const auth = Buffer.from(`${username}:${password}`).toString("base64");
+    const response = await axios.get(`${site}/wp-json/wp/v2/tags?per_page=100`, {
+      headers: { Authorization: `Basic ${auth}` },
+      httpsAgent
+    });
+    res.json(response.data);
+  } catch (error: any) {
+    res.status(error.response?.status || 500).json(error.response?.data || { message: error.message });
+  }
+});
+
 // CSV Parsing Endpoint
 app.post("/api/parse-csv", (req, res) => {
   const { csvData } = req.body;

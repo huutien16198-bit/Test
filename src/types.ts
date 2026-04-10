@@ -4,6 +4,8 @@ export interface WPSite {
   username: string;
   applicationPassword: string;
   name: string;
+  uid?: string;
+  createdAt?: number;
 }
 
 export interface PostData {
@@ -23,6 +25,8 @@ export interface LogEntry {
   level: 'info' | 'error' | 'success';
   message: string;
   site?: string;
+  uid?: string;
+  createdAt?: number;
 }
 
 export interface BulkJob {
